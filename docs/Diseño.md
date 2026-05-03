@@ -1,3 +1,4 @@
+
 # Diseño de la API
 # Maria Clara Medina y Franchesca Garcia Tabares
 
@@ -723,7 +724,7 @@ activo, inactivo, borrado
 Estados de lotes:
 
 ```text
-pendiente, corriendo, suspendido, terminado, fallido, matado
+pendiente, corriendo, terminado, fallido, matado
 ```
 
 Operaciones de control:
@@ -770,7 +771,7 @@ Para esta entrega se toman estas decisiones:
 9. La API será igual para Linux y Windows 11.
 10. `ejecutar_lote` recibirá identificadores registrados, no rutas directas.
 11. `crear_fichero` acepta un campo `contenido` opcional. Si no se envía, el fichero se crea vacío. Esto extiende levemente la especificación para mayor utilidad en los lotes.
-12. `leer_programa` y `estado_lote` tienen comportamiento dual: con identificador retornan el recurso específico; sin identificador listan todos los recursos del tipo correspondiente.
+12. `leer_programa`, `leer_fichero` y `estado_lote` tienen comportamiento dual: con identificador retornan el recurso específico; sin identificador listan todos los recursos del tipo correspondiente.
 
 ---
 
