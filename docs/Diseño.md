@@ -81,6 +81,8 @@ En Windows 11 se podrían usar nombres como:
 
 El sistema puede recibir peticiones de varios clientes. Como las tuberías funcionan como un canal compartido, los mensajes se atienden de forma secuencial según van llegando al buffer de la tubería.
 
+Las escrituras sobre la tubería se consideran atómicas para cada mensaje completo. Es decir, cuando un cliente escribe una petición, el mensaje entra completo al buffer de la tubería y ctrllt lo procesa como una unidad JSON.
+
 Para diferenciar las solicitudes y respuestas se usan dos campos:
 
 - `id_peticion`: identifica una petición específica.
@@ -90,7 +92,7 @@ De esta forma, aunque varios clientes estén usando la misma tubería, cada clie
 
 No se propone crear una tubería diferente para cada cliente, porque eso haría más complejo el manejo de nombres de tuberías. La propuesta es mantener una tubería de comunicación por servicio y usar los identificadores dentro del JSON.
 
-En una implementación futura, el control o los servicios podrían usar lectura no bloqueante, `select`, `poll` o hilos para revisar las tuberías sin quedarse bloqueados esperando una sola respuesta.
+En una implementación futura, `ctrllt` podría usar lectura no bloqueante, `select`, `poll` o un conjunto de hilos para atender peticiones externas y respuestas de los servicios sin quedarse bloqueado esperando una sola tubería.
 
 ---
 
