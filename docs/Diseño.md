@@ -77,13 +77,50 @@ En Windows 11 se podrían usar nombres como:
 
 ---
 
+### 3.1 Manejo de múltiples clientes y tuberías
+
+El sistema puede recibir peticiones de varios clientes. Como las tuberías funcionan como un canal compartido, los mensajes se atienden de forma secuencial según van llegando al buffer de la tubería.
+
+Para diferenciar las solicitudes y respuestas se usan dos campos:
+
+- `id_peticion`: identifica una petición específica.
+- `id_cliente`: identifica al cliente que envió la petición.
+
+De esta forma, aunque varios clientes estén usando la misma tubería, cada cliente puede reconocer cuáles respuestas le corresponden.
+
+No se propone crear una tubería diferente para cada cliente, porque eso haría más complejo el manejo de nombres de tuberías. La propuesta es mantener una tubería de comunicación por servicio y usar los identificadores dentro del JSON.
+
+En una implementación futura, el control o los servicios podrían usar lectura no bloqueante, `select`, `poll` o hilos para revisar las tuberías sin quedarse bloqueados esperando una sola respuesta.
+
+---
+
+### 3.2 Responsabilidad de creación y orden de arranque
+
+Cada servicio será responsable de crear las tuberías que usa para recibir peticiones. Por ejemplo:
+
+- `gesprog` crea sus tuberías de comunicación.
+- `gesfich` crea sus tuberías de comunicación.
+- `ejecutor` crea sus tuberías de comunicación.
+- `ctrllt` se conecta a las tuberías de los servicios para redirigir las solicitudes.
+
+El orden recomendado de arranque es desde los procesos más internos hacia afuera:
+
+```text
+1. aralmac o estructura de almacenamiento
+2. gesprog, gesfich y ejecutor
+3. ctrllt
+4. cliente
+```
+---
+
 ## 4. Estructura base de los mensajes
 
-Todas las peticiones tendrán esta estructura:
+Todas las peticiones tendrán una estructura común en formato JSON. Cada mensaje incluye un identificador de petición y un identificador de cliente para poder relacionar la respuesta con quien hizo la solicitud.
 
 ```json
 {
     "id_peticion": "req-0001",
+    "id_cliente": "cli-0001",
     "servicio": "nombre_servicio",
     "operacion": "nombre_operacion",
     "datos": {}
@@ -95,6 +132,7 @@ Respuesta exitosa:
 ```json
 {
     "id_peticion": "req-0001",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Operación realizada correctamente",
     "datos": {}
@@ -106,6 +144,7 @@ Respuesta con error:
 ```json
 {
     "id_peticion": "req-0001",
+    "id_cliente": "cli-0001",
     "estado": "error",
     "mensaje": "Descripción del error",
     "codigo": "CODIGO_ERROR"
@@ -175,6 +214,7 @@ Registrar programa:
 ```json
 {
     "id_peticion": "req-0001",
+    "id_cliente": "cli-0001",
     "servicio": "gesprog",
     "operacion": "registrar_programa",
     "datos": {
@@ -193,6 +233,7 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0001",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Programa registrado correctamente",
     "datos": {
@@ -206,6 +247,7 @@ Leer programa (con identificador):
 ```json
 {
     "id_peticion": "req-0002",
+    "id_cliente": "cli-0001",
     "servicio": "gesprog",
     "operacion": "leer_programa",
     "datos": {
@@ -219,6 +261,7 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0002",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Programa encontrado",
     "datos": {
@@ -239,6 +282,7 @@ Leer programa (sin identificador — equivale a listar todos):
 ```json
 {
     "id_peticion": "req-0002b",
+    "id_cliente": "cli-0001",
     "servicio": "gesprog",
     "operacion": "leer_programa",
     "datos": {}
@@ -250,6 +294,7 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0002b",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Listado de programas registrados",
     "datos": {
@@ -270,6 +315,7 @@ Borrar programa:
 ```json
 {
     "id_peticion": "req-0003",
+    "id_cliente": "cli-0001",
     "servicio": "gesprog",
     "operacion": "borrar_programa",
     "datos": {
@@ -283,6 +329,7 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0003",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Programa borrado correctamente",
     "datos": {
@@ -309,7 +356,7 @@ f-0001
 
 | Operación | Datos esperados | Respuesta principal |
 |---|---|---|
-| `crear_fichero` | `{ "contenido": "texto inicial" }` o `{ "contenido": "" }` | Retorna `id_fichero`. Por defecto crea el fichero vacío; el campo `contenido` es opcional. |
+| `crear_fichero` | `{ "contenido_base64": "dW5vCmRvcwp0cmVzCg==" }` o `{}` | Retorna `id_fichero`. Por defecto crea el fichero vacío; el campo contenido_base64 es opcional. |
 | `leer_fichero` | `{ "id_fichero": "f-0001" }` | Retorna el contenido del fichero. Si no se envía `id_fichero`, lista todos los ficheros registrados. |
 | `listar_ficheros` | `{}` | Lista los ficheros registrados. |
 | `actualizar_fichero` | `{ "id_fichero": "f-0001", "ruta_fichero": "./datos/nuevo.txt" }` | Reemplaza el contenido almacenado en `aralmac` por el contenido del fichero externo indicado. |
@@ -345,11 +392,13 @@ Crear fichero:
 
 ```json
 {
-    "id_peticion": "req-0004",
+    "id_peticion": "req-0003",
+    "id_cliente": "cli-0001",
     "servicio": "gesfich",
     "operacion": "crear_fichero",
     "datos": {
-        "contenido": "3\n1\n2\n"
+        "nombre": "entrada.txt",
+        "contenido_base64": "dW5vCmRvcwp0cmVzCg=="
     }
 }
 ```
@@ -358,7 +407,8 @@ Respuesta:
 
 ```json
 {
-    "id_peticion": "req-0004",
+    "id_peticion": "req-0003",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Fichero creado correctamente",
     "datos": {
@@ -371,7 +421,8 @@ Leer fichero (con identificador):
 
 ```json
 {
-    "id_peticion": "req-0005",
+    "id_peticion": "req-0004",
+    "id_cliente": "cli-0001",
     "servicio": "gesfich",
     "operacion": "leer_fichero",
     "datos": {
@@ -384,12 +435,14 @@ Respuesta:
 
 ```json
 {
-    "id_peticion": "req-0005",
+    "id_peticion": "req-0004",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Fichero encontrado",
     "datos": {
         "id_fichero": "f-0001",
-        "contenido": "3\n1\n2\n"
+        "nombre": "entrada.txt",
+        "contenido_base64": "dW5vCmRvcwp0cmVzCg=="
     }
 }
 ```
@@ -399,6 +452,7 @@ Leer fichero (sin identificador — equivale a listar todos):
 ```json
 {
     "id_peticion": "req-0005b",
+    "id_cliente": "cli-0001",
     "servicio": "gesfich",
     "operacion": "leer_fichero",
     "datos": {}
@@ -410,6 +464,7 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0005b",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Listado de ficheros registrados",
     "datos": {
@@ -432,6 +487,7 @@ Actualizar fichero:
 ```json
 {
     "id_peticion": "req-0006",
+    "id_cliente": "cli-0001",
     "servicio": "gesfich",
     "operacion": "actualizar_fichero",
     "datos": {
@@ -446,6 +502,7 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0006",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Fichero actualizado correctamente",
     "datos": {
@@ -459,6 +516,7 @@ Borrar fichero:
 ```json
 {
     "id_peticion": "req-0007",
+    "id_cliente": "cli-0001",
     "servicio": "gesfich",
     "operacion": "borrar_fichero",
     "datos": {
@@ -472,6 +530,7 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0007",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Fichero borrado correctamente",
     "datos": {
@@ -560,6 +619,7 @@ Ejecutar lote:
 ```json
 {
     "id_peticion": "req-0008",
+    "id_cliente": "cli-0001",
     "servicio": "ejecutor",
     "operacion": "ejecutar_lote",
     "datos": {
@@ -575,6 +635,7 @@ Respuesta exitosa:
 ```json
 {
     "id_peticion": "req-0008",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Proceso de lote iniciado correctamente",
     "datos": {
@@ -589,6 +650,7 @@ Respuesta de error (fichero o programa no existe):
 ```json
 {
     "id_peticion": "req-0008",
+    "id_cliente": "cli-0001",
     "estado": "error",
     "mensaje": "El fichero de entrada no existe",
     "codigo": "FICHERO_NO_EXISTE"
@@ -598,6 +660,7 @@ Respuesta de error (fichero o programa no existe):
 ```json
 {
     "id_peticion": "req-0008",
+    "id_cliente": "cli-0001",
     "estado": "error",
     "mensaje": "Uno o más programas de la lista no existen",
     "codigo": "REFERENCIA_INVALIDA"
@@ -609,6 +672,7 @@ Consultar estado de un lote:
 ```json
 {
     "id_peticion": "req-0009",
+    "id_cliente": "cli-0001",
     "servicio": "ejecutor",
     "operacion": "estado_lote",
     "datos": {
@@ -622,6 +686,7 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0009",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Estado del lote consultado correctamente",
     "datos": {
@@ -639,6 +704,7 @@ Consultar estado sin identificador (equivale a listar todos):
 ```json
 {
     "id_peticion": "req-0009b",
+    "id_cliente": "cli-0001",
     "servicio": "ejecutor",
     "operacion": "estado_lote",
     "datos": {}
@@ -650,6 +716,7 @@ Matar lote:
 ```json
 {
     "id_peticion": "req-0010",
+    "id_cliente": "cli-0001",
     "servicio": "ejecutor",
     "operacion": "matar_lote",
     "datos": {
@@ -663,6 +730,7 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0010",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Proceso de lote terminado forzosamente",
     "datos": {
@@ -677,6 +745,7 @@ Listar todos los lotes:
 ```json
 {
     "id_peticion": "req-0011",
+    "id_cliente": "cli-0001",
     "servicio": "ejecutor",
     "operacion": "listar_lotes",
     "datos": {}
@@ -688,6 +757,7 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0011",
+    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Listado de procesos de lote",
     "datos": {
@@ -754,6 +824,18 @@ Errores principales:
 | `SERVICIO_SUSPENDIDO` | La operación no está permitida mientras el servicio está suspendido. |
 | `ERROR_INTERNO` | Error inesperado del servicio. |
 
+Ejemplo de error por servicio suspendido:
+
+```json
+{
+    "id_peticion": "req-0012",
+    "id_cliente": "cli-0001",
+    "estado": "error",
+    "mensaje": "El servicio está suspendido y no puede procesar esta operación",
+    "codigo": "SERVICIO_SUSPENDIDO"
+}
+```
+
 ---
 
 ## 7. Decisiones de diseño
@@ -770,8 +852,13 @@ Para esta entrega se toman estas decisiones:
 8. `aralmac` no se fija todavía; después puede implementarse con archivos, base de datos o memoria.
 9. La API será igual para Linux y Windows 11.
 10. `ejecutar_lote` recibirá identificadores registrados, no rutas directas.
-11. `crear_fichero` acepta un campo `contenido` opcional. Si no se envía, el fichero se crea vacío. Esto extiende levemente la especificación para mayor utilidad en los lotes.
+11. `crear_fichero` acepta un campo `contenido_base64` opcional. Si no se envía, el fichero se crea vacío.
 12. `leer_programa`, `leer_fichero` y `estado_lote` tienen comportamiento dual: con identificador retornan el recurso específico; sin identificador listan todos los recursos del tipo correspondiente.
+13. Cada mensaje incluirá `id_cliente` para facilitar la identificación de respuestas cuando existan varios clientes usando la misma tubería.
+14. Cada servicio será responsable de crear sus propias tuberías de comunicación.
+15. El orden recomendado de arranque será: almacenamiento, servicios, control y cliente.
+16. El contenido de los ficheros viajará dentro del JSON usando Base64 mediante el campo `contenido_base64`.
+17. En estado suspendido, las operaciones principales no se encolan; se rechazan con un error `SERVICIO_SUSPENDIDO`, excepto las operaciones permitidas para consultar o reactivar el servicio.
 
 ---
 
