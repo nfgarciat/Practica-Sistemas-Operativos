@@ -1,6 +1,20 @@
-
 # Diseño de la API
 # Maria Clara Medina y Franchesca Garcia Tabares
+
+## Tabla de contenidos
+
+1. [Propósito del proyecto](#1-propósito-del-proyecto)
+2. [Componentes propuestos](#2-componentes-propuestos)
+3. [Comunicación y sistemas operativos](#3-comunicación-y-sistemas-operativos)
+4. [Arranque de los componentes](#4-arranque-de-los-componentes)
+5. [Estructura base de los mensajes](#5-estructura-base-de-los-mensajes)
+6. [Servicios de la API](#6-servicios-de-la-api)
+7. [Estados, control y errores](#7-estados-control-y-errores)
+8. [Flujo de ejemplo completo](#8-flujo-de-ejemplo-completo)
+9. [Decisiones de diseño](#9-decisiones-de-diseño)
+10. [Primera entrega](#10-primera-entrega)
+
+---
 
 ## 1. Propósito del proyecto
 
@@ -20,12 +34,12 @@ El sistema se divide en los siguientes componentes:
 
 | Componente | Responsabilidad |
 |---|---|
-| `cliente` | Envía solicitudes al sistema. No se implementa en esta entrega. |
-| `ctrllt` | Recibe peticiones y las redirige al servicio correcto. |
+| `cliente` | Envía solicitudes al sistema. Puede comunicarse con `ctrllt` o directamente con los servicios. No se implementa en esta entrega. |
+| `ctrllt` | Recibe peticiones y las redirige al servicio correcto. Solo hace enrutamiento. |
 | `gesprog` | Administra programas registrados. |
 | `gesfich` | Administra ficheros registrados. |
-| `ejecutor` | Ejecuta y controla procesos de lote. |
-| `aralmac` | Área donde se almacenan programas, ficheros e información del sistema. |
+| `ejecutor` | Ejecuta y controla procesos de lote de forma concurrente. |
+| `aralmac` | Área donde se almacenan programas, ficheros e información del sistema. Se accede mediante una biblioteca interna compartida. |
 
 Flujo general:
 
@@ -33,9 +47,13 @@ Flujo general:
 cliente -> ctrllt -> gesprog
                  -> gesfich
                  -> ejecutor
+
+cliente -> gesprog   (conexión directa)
+cliente -> gesfich   (conexión directa)
+cliente -> ejecutor  (conexión directa)
 ```
 
-`ctrllt` actúa como pasarela. Recibe una petición JSON, revisa el servicio solicitado y la envía al componente correspondiente.
+`ctrllt` actúa como pasarela opcional. Recibe una petición JSON, revisa el servicio solicitado y la envía al componente correspondiente. El cliente también puede conectarse directamente a cualquiera de los servicios sin pasar por `ctrllt`.
 
 ---
 
@@ -43,19 +61,28 @@ cliente -> ctrllt -> gesprog
 
 Los procesos se comunicarán mediante tuberías nombradas. Cada mensaje enviado por una tubería será un JSON.
 
-El diseño contempla dos casos:
+### 3.1 Modelo de tuberías por sistema operativo
 
-- `full-duplex`: una tubería permite enviar y recibir.
-- `half-duplex`: se usan dos tuberías, una para petición y otra para respuesta.
+El modelo de comunicación depende del sistema operativo:
 
-Ejemplo:
+- **Linux**: se usan dos tuberías por servicio, una para petición y otra para respuesta (half-duplex). La tubería de respuesta es única por servicio y es compartida: todos los clientes que se comuniquen con un mismo servicio leen sus respuestas de esa misma tubería de retorno. Las respuestas se identifican mediante el campo `id_peticion`.
+
+- **Windows 11**: se usa una sola tubería por instancia de conexión en modo **full-duplex** (obligatorio). Windows no soporta el modelo half-duplex de manera confiable con tuberías nombradas, por lo que en esta plataforma cada cliente abre una instancia de tubería full-duplex con el servicio correspondiente.
+
+Ejemplo (Linux, half-duplex):
 
 ```text
-cliente ---- petición ----> ctrllt
-cliente <--- respuesta ---- ctrllt
+cliente ---- petición ----> ctrllt  (tubería de entrada)
+cliente <--- respuesta ---- ctrllt  (tubería de respuesta única)
 ```
 
-La API será la misma en Linux y Windows 11. Lo que cambia es la implementación de las tuberías.
+Ejemplo (Windows 11, full-duplex):
+
+```text
+cliente <---> ctrllt  (una sola tubería, bidireccional por instancia)
+```
+
+### 3.2 Nombres de tuberías
 
 En Linux se podrían usar nombres como:
 
@@ -75,69 +102,87 @@ En Windows 11 se podrían usar nombres como:
 \\.\pipe\lotes_ejecutor
 ```
 
----
+### 3.3 Script de limpieza
 
-### 3.1 Manejo de múltiples clientes y tuberías
+Antes de iniciar el sistema se debe ejecutar un script de limpieza que elimine las tuberías nombradas huérfanas y el estado persistente previo. Esto garantiza que el sistema arranque en un estado conocido.
 
-El sistema puede recibir peticiones de varios clientes. Como las tuberías funcionan como un canal compartido, los mensajes se atienden de forma secuencial según van llegando al buffer de la tubería.
+En Linux, el script debe eliminar los ficheros de tubería que hayan quedado del proceso anterior:
 
-Las escrituras sobre la tubería se consideran atómicas para cada mensaje completo. Es decir, cuando un cliente escribe una petición, el mensaje entra completo al buffer de la tubería y ctrllt lo procesa como una unidad JSON.
-
-Para diferenciar las solicitudes y respuestas se usan dos campos:
-
-- `id_peticion`: identifica una petición específica.
-- `id_cliente`: identifica al cliente que envió la petición.
-
-De esta forma, aunque varios clientes estén usando la misma tubería, cada cliente puede reconocer cuáles respuestas le corresponden.
-
-No se propone crear una tubería diferente para cada cliente, porque eso haría más complejo el manejo de nombres de tuberías. La propuesta es mantener una tubería de comunicación por servicio y usar los identificadores dentro del JSON.
-
-En una implementación futura, `ctrllt` podría usar lectura no bloqueante, `select`, `poll` o un conjunto de hilos para atender peticiones externas y respuestas de los servicios sin quedarse bloqueado esperando una sola tubería.
-
----
-
-### 3.2 Responsabilidad de creación y orden de arranque
-
-Cada servicio será responsable de crear las tuberías que usa para recibir peticiones. Por ejemplo:
-
-- `gesprog` crea sus tuberías de comunicación.
-- `gesfich` crea sus tuberías de comunicación.
-- `ejecutor` crea sus tuberías de comunicación.
-- `ctrllt` se conecta a las tuberías de los servicios para redirigir las solicitudes.
-
-El orden recomendado de arranque es desde los procesos más internos hacia afuera:
-
-```text
-1. aralmac o estructura de almacenamiento
-2. gesprog, gesfich y ejecutor
-3. ctrllt
-4. cliente
+```bash
+rm -f /tmp/lotes_ctrllt
+rm -f /tmp/lotes_gesprog
+rm -f /tmp/lotes_gesfich
+rm -f /tmp/lotes_ejecutor
 ```
+
+En Windows 11 las tuberías son gestionadas por el sistema operativo y se limpian automáticamente al terminar el proceso. No obstante, el script debe verificar que no haya instancias previas activas antes de arrancar.
+
+El script de limpieza debe ejecutarse siempre antes de lanzar cualquier componente del sistema. Si se desea también limpiar los datos persistentes (programas, ficheros y lotes registrados en `aralmac`), esto debe hacerse explícitamente mediante una operación de administración o eliminando los datos directamente.
+
 ---
 
-## 4. Estructura base de los mensajes
+## 4. Arranque de los componentes
 
-Todas las peticiones tendrán una estructura común en formato JSON. Cada mensaje incluye un identificador de petición y un identificador de cliente para poder relacionar la respuesta con quien hizo la solicitud.
+Cada componente se inicia como un proceso independiente y recibe por línea de comandos las tuberías que debe usar y la configuración de `aralmac`. Los parámetros opcionales solo aplican en sistemas half-duplex (Linux).
+
+**ctrllt**
+```
+ctrllt -c <tuberia-cliente-entrada> [-r <tuberia-cliente-respuesta>]
+       -g <tuberia-gesprog>         [-rg <tuberia-gesprog-respuesta>]
+       -f <tuberia-gesfich>         [-rf <tuberia-gesfich-respuesta>]
+       -e <tuberia-ejecutor>        [-re <tuberia-ejecutor-respuesta>]
+```
+
+**gesprog**
+```
+gesprog -g <tuberia-entrada> [-r <tuberia-respuesta>] -x <info-aralmac>
+```
+
+**gesfich**
+```
+gesfich -f <tuberia-entrada> [-r <tuberia-respuesta>] -x <info-aralmac>
+```
+
+**ejecutor**
+```
+ejecutor -e <tuberia-entrada> [-r <tuberia-respuesta>] -x <info-aralmac>
+```
+
+| Parámetro | Descripción |
+|---|---|
+| `-c / -g / -f / -e` | Tubería de entrada de peticiones del componente. En full-duplex también recibe respuestas. |
+| `-r / -rg / -rf / -re` | Tubería de respuesta (solo en half-duplex, Linux). |
+| `-x <info-aralmac>` | Ruta o parámetros de conexión al área de almacenamiento compartida. |
+
+En Windows 11 los parámetros `-r` no se usan; cada componente gestiona el canal bidireccional sobre la misma tubería full-duplex.
+
+---
+
+## 5. Estructura base de los mensajes
+
+Todas las peticiones tendrán esta estructura:
 
 ```json
 {
     "id_peticion": "req-0001",
-    "id_cliente": "cli-0001",
     "servicio": "nombre_servicio",
     "operacion": "nombre_operacion",
-    "datos": {}
+    "datos": {},
+    "timestamp": "2026-05-07T19:00:00Z"
 }
 ```
+
+El campo `timestamp` sigue el formato ISO 8601. Sirve para correlacionar eventos en logs y depurar problemas de orden de mensajes.
 
 Respuesta exitosa:
 
 ```json
 {
     "id_peticion": "req-0001",
-    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Operación realizada correctamente",
-    "datos": {}
+    "datos": {},
+    "timestamp": "2026-05-07T19:00:01Z"
 }
 ```
 
@@ -146,22 +191,38 @@ Respuesta con error:
 ```json
 {
     "id_peticion": "req-0001",
-    "id_cliente": "cli-0001",
     "estado": "error",
     "mensaje": "Descripción del error",
-    "codigo": "CODIGO_ERROR"
+    "codigo": "CODIGO_ERROR",
+    "detalles": {},
+    "timestamp": "2026-05-07T19:00:01Z"
+}
+```
+
+El campo `detalles` en las respuestas de error es un objeto opcional que proporciona contexto adicional sobre el fallo, como el identificador que no se encontró o el campo que faltó. Ejemplo:
+
+```json
+{
+    "id_peticion": "req-0005",
+    "estado": "error",
+    "mensaje": "El fichero solicitado no existe",
+    "codigo": "FICHERO_NO_EXISTE",
+    "detalles": {
+        "id_fichero": "f-9999"
+    },
+    "timestamp": "2026-05-07T19:00:01Z"
 }
 ```
 
 ---
 
-## 5. Servicios de la API
+## 6. Servicios de la API
 
 En esta sección se definen los servicios principales y las operaciones que acepta cada uno. Para no repetir demasiado, primero se muestran las operaciones en tablas y luego algunos ejemplos JSON de las peticiones más importantes.
 
 ---
 
-### 5.1 gesprog
+### 6.1 gesprog
 
 `gesprog` administra los programas registrados en `aralmac`. Cada programa se identifica con el formato:
 
@@ -179,44 +240,20 @@ Un programa almacena ejecutable, argumentos, variables de ambiente, descripción
 
 | Operación | Datos esperados | Respuesta principal |
 |---|---|---|
-| `registrar_programa` | `{ "ejecutable": "/usr/bin/wc", "argumentos": ["-l"], "ambiente": { "LANG": "es_CO.UTF-8" }, "descripcion": "Cuenta líneas" }` | Retorna `id_programa`. |
-| `leer_programa` | `{ "id_programa": "p-0001" }` | Retorna los datos del programa. Si no se envía `id_programa`, lista todos los programas registrados. |
-| `listar_programas` | `{}` | Lista todos los programas registrados. |
+| `registrar_programa` | `{ "ejecutable": "/usr/bin/wc", "argumentos": ["-l"], "ambiente": { "LANG": "es_CO.UTF-8" }, "descripcion": "Cuenta líneas" }` | Retorna id_programa. |
+| `leer_programa` | `{ "id_programa": "p-0001" }` | Consulta un programa. |
+| `listar_programas` | `{}` | Lista los programas registrados. |
 | `actualizar_programa` | `{ "id_programa": "p-0001", "ejecutable": "/usr/bin/wc", "argumentos": ["-w"], "ambiente": {}, "descripcion": "Cuenta palabras" }` | Actualiza el programa. |
 | `borrar_programa` | `{ "id_programa": "p-0001" }` | Borra el programa. |
 | `suspender_servicio` | `{}` | Cambia el servicio a suspendido. |
 | `reasumir_servicio` | `{}` | Cambia el servicio a corriendo. |
 | `terminar_servicio` | `{}` | Cambia el servicio a terminado. |
 
-#### Máquina de estados de gesprog
-
-```
-  [Inicio] --> [Corriendo] <--> [Suspendido]
-                    |
-                    v
-              [Terminado]
-```
-
-Transiciones:
-
-| Desde | Evento | Hacia |
-|---|---|---|
-| Inicio | arranque | Corriendo |
-| Corriendo | `suspender_servicio` | Suspendido |
-| Suspendido | `reasumir_servicio` | Corriendo |
-| Corriendo | `terminar_servicio` | Terminado |
-| Suspendido | `terminar_servicio` | Terminado |
-
-En estado **Corriendo** se aceptan: `registrar_programa`, `leer_programa`, `listar_programas`, `actualizar_programa`, `borrar_programa`. En estado **Suspendido** solo se acepta `leer_programa`. En estado **Terminado** no se acepta ninguna operación.
-
-#### Ejemplos JSON
-
-Registrar programa:
+Ejemplo para registrar programa:
 
 ```json
 {
     "id_peticion": "req-0001",
-    "id_cliente": "cli-0001",
     "servicio": "gesprog",
     "operacion": "registrar_programa",
     "datos": {
@@ -235,7 +272,6 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0001",
-    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Programa registrado correctamente",
     "datos": {
@@ -244,96 +280,13 @@ Respuesta:
 }
 ```
 
-Leer programa (con identificador):
+Ejemplo para leer programa:
 
 ```json
 {
     "id_peticion": "req-0002",
-    "id_cliente": "cli-0001",
     "servicio": "gesprog",
     "operacion": "leer_programa",
-    "datos": {
-        "id_programa": "p-0001"
-    }
-}
-```
-
-Respuesta:
-
-```json
-{
-    "id_peticion": "req-0002",
-    "id_cliente": "cli-0001",
-    "estado": "ok",
-    "mensaje": "Programa encontrado",
-    "datos": {
-        "id_programa": "p-0001",
-        "ejecutable": "/usr/bin/wc",
-        "argumentos": ["-l"],
-        "ambiente": {
-            "LANG": "es_CO.UTF-8"
-        },
-        "descripcion": "Cuenta la cantidad de líneas del fichero de entrada",
-        "estado_programa": "activo"
-    }
-}
-```
-
-Leer programa (sin identificador — equivale a listar todos):
-
-```json
-{
-    "id_peticion": "req-0002b",
-    "id_cliente": "cli-0001",
-    "servicio": "gesprog",
-    "operacion": "leer_programa",
-    "datos": {}
-}
-```
-
-Respuesta:
-
-```json
-{
-    "id_peticion": "req-0002b",
-    "id_cliente": "cli-0001",
-    "estado": "ok",
-    "mensaje": "Listado de programas registrados",
-    "datos": {
-        "programas": [
-            {
-                "id_programa": "p-0001",
-                "ejecutable": "/usr/bin/wc",
-                "descripcion": "Cuenta la cantidad de líneas del fichero de entrada",
-                "estado_programa": "activo"
-            }
-        ]
-    }
-}
-```
-
-Borrar programa:
-
-```json
-{
-    "id_peticion": "req-0003",
-    "id_cliente": "cli-0001",
-    "servicio": "gesprog",
-    "operacion": "borrar_programa",
-    "datos": {
-        "id_programa": "p-0001"
-    }
-}
-```
-
-Respuesta:
-
-```json
-{
-    "id_peticion": "req-0003",
-    "id_cliente": "cli-0001",
-    "estado": "ok",
-    "mensaje": "Programa borrado correctamente",
     "datos": {
         "id_programa": "p-0001"
     }
@@ -342,7 +295,7 @@ Respuesta:
 
 ---
 
-### 5.2 gesfich
+### 6.2 gesfich
 
 `gesfich` administra los ficheros registrados en `aralmac`. Cada fichero se identifica con el formato:
 
@@ -358,49 +311,24 @@ f-0001
 
 | Operación | Datos esperados | Respuesta principal |
 |---|---|---|
-| `crear_fichero` | `{ "contenido_base64": "dW5vCmRvcwp0cmVzCg==" }` o `{}` | Retorna `id_fichero`. Por defecto crea el fichero vacío; el campo contenido_base64 es opcional. |
-| `leer_fichero` | `{ "id_fichero": "f-0001" }` | Retorna el contenido del fichero. Si no se envía `id_fichero`, lista todos los ficheros registrados. |
+| `crear_fichero` | `{ "contenido": "texto inicial" }` o `{ "contenido": "" }` | Retorna id_fichero. |
+| `leer_fichero` | `{ "id_fichero": "f-0001" }` | Lee un fichero específico o lista los ficheros si no recibe identificador. |
 | `listar_ficheros` | `{}` | Lista los ficheros registrados. |
-| `actualizar_fichero` | `{ "id_fichero": "f-0001", "ruta_fichero": "./datos/nuevo.txt" }` | Reemplaza el contenido almacenado en `aralmac` por el contenido del fichero externo indicado. |
-| `borrar_fichero` | `{ "id_fichero": "f-0001" }` | Borra el fichero. |
+| `actualizar_fichero` | `{ "id_fichero": "f-0001", "ruta_fichero": "./datos/nuevo.txt" }` | Reemplaza el contenido usando la ruta de un fichero externo. |
+| `borrar_fichero` | `{ "id_fichero": "f-0001" }` | Borra el fichero. Falla con `FICHERO_EN_USO` si hay un lote activo usándolo. |
 | `suspender_servicio` | `{}` | Cambia el servicio a suspendido. |
 | `reasumir_servicio` | `{}` | Cambia el servicio a corriendo. |
 | `terminar_servicio` | `{}` | Cambia el servicio a terminado. |
 
-#### Máquina de estados de gesfich
-
-```
-  [Inicio] --> [Corriendo] <--> [Suspendido]
-                    |
-                    v
-              [Terminado]
-```
-
-Transiciones:
-
-| Desde | Evento | Hacia |
-|---|---|---|
-| Inicio | arranque | Corriendo |
-| Corriendo | `suspender_servicio` | Suspendido |
-| Suspendido | `reasumir_servicio` | Corriendo |
-| Corriendo | `terminar_servicio` | Terminado |
-| Suspendido | `terminar_servicio` | Terminado |
-
-En estado **Corriendo** se aceptan todas las operaciones. En estado **Suspendido** solo se acepta `leer_fichero`. En estado **Terminado** no se acepta ninguna operación.
-
-#### Ejemplos JSON
-
-Crear fichero:
+Ejemplo para crear fichero:
 
 ```json
 {
     "id_peticion": "req-0003",
-    "id_cliente": "cli-0001",
     "servicio": "gesfich",
     "operacion": "crear_fichero",
     "datos": {
-        "nombre": "entrada.txt",
-        "contenido_base64": "dW5vCmRvcwp0cmVzCg=="
+        "contenido": "3\n1\n2\n"
     }
 }
 ```
@@ -410,7 +338,6 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0003",
-    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Fichero creado correctamente",
     "datos": {
@@ -419,12 +346,11 @@ Respuesta:
 }
 ```
 
-Leer fichero (con identificador):
+Ejemplo para leer un fichero:
 
 ```json
 {
     "id_peticion": "req-0004",
-    "id_cliente": "cli-0001",
     "servicio": "gesfich",
     "operacion": "leer_fichero",
     "datos": {
@@ -438,58 +364,22 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0004",
-    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Fichero encontrado",
     "datos": {
         "id_fichero": "f-0001",
-        "nombre": "entrada.txt",
-        "contenido_base64": "dW5vCmRvcwp0cmVzCg=="
+        "contenido": "3\n1\n2\n"
     }
 }
 ```
 
-Leer fichero (sin identificador — equivale a listar todos):
+Si `leer_fichero` no recibe `id_fichero`, se interpreta como una consulta general de los ficheros registrados.
+
+Ejemplo para actualizar:
 
 ```json
 {
-    "id_peticion": "req-0005b",
-    "id_cliente": "cli-0001",
-    "servicio": "gesfich",
-    "operacion": "leer_fichero",
-    "datos": {}
-}
-```
-
-Respuesta:
-
-```json
-{
-    "id_peticion": "req-0005b",
-    "id_cliente": "cli-0001",
-    "estado": "ok",
-    "mensaje": "Listado de ficheros registrados",
-    "datos": {
-        "ficheros": [
-            {
-                "id_fichero": "f-0001",
-                "estado_fichero": "activo"
-            },
-            {
-                "id_fichero": "f-0002",
-                "estado_fichero": "activo"
-            }
-        ]
-    }
-}
-```
-
-Actualizar fichero:
-
-```json
-{
-    "id_peticion": "req-0006",
-    "id_cliente": "cli-0001",
+    "id_peticion": "req-0005",
     "servicio": "gesfich",
     "operacion": "actualizar_fichero",
     "datos": {
@@ -499,26 +389,13 @@ Actualizar fichero:
 }
 ```
 
-Respuesta:
+En esta operación, actualizar significa reemplazar el contenido almacenado en `aralmac` por el contenido del fichero indicado en `ruta_fichero`.
+
+Ejemplo para borrar:
 
 ```json
 {
     "id_peticion": "req-0006",
-    "id_cliente": "cli-0001",
-    "estado": "ok",
-    "mensaje": "Fichero actualizado correctamente",
-    "datos": {
-        "id_fichero": "f-0001"
-    }
-}
-```
-
-Borrar fichero:
-
-```json
-{
-    "id_peticion": "req-0007",
-    "id_cliente": "cli-0001",
     "servicio": "gesfich",
     "operacion": "borrar_fichero",
     "datos": {
@@ -527,23 +404,9 @@ Borrar fichero:
 }
 ```
 
-Respuesta:
-
-```json
-{
-    "id_peticion": "req-0007",
-    "id_cliente": "cli-0001",
-    "estado": "ok",
-    "mensaje": "Fichero borrado correctamente",
-    "datos": {
-        "id_fichero": "f-0001"
-    }
-}
-```
-
 ---
 
-### 5.3 ejecutor
+### 6.3 ejecutor
 
 `ejecutor` administra los procesos de lote. Cada lote se identifica con el formato:
 
@@ -557,71 +420,41 @@ Ejemplo:
 l-0001
 ```
 
-Un lote recibe un fichero de entrada, un fichero de salida y una lista ordenada de programas.
-
-Ejemplo conceptual:
+Un lote requiere obligatoriamente un fichero de entrada, un fichero de salida y una lista ordenada de al menos un programa. El formato de ejecución es:
 
 ```text
-f-0001 -> p-0001 -> p-0002 -> f-0002
+fichero_entrada -> programa_1 -> programa_2 -> ... -> fichero_salida
 ```
+
+Ambos ficheros (entrada y salida) son **obligatorios**. Si falta cualquiera de los dos, la operación retorna error `FICHERO_REQUERIDO`.
+
+#### Concurrencia
+
+El ejecutor puede gestionar múltiples procesos de lote simultáneamente. Cada lote se ejecuta en su propio hilo de ejecución. Cuando el ejecutor está en estado `suspendido`, los lotes ya en ejecución continúan corriendo hasta terminar, pero no se aceptan nuevas solicitudes de ejecución.
+
+#### Acceso a aralmac
+
+El ejecutor no se comunica con `gesprog` ni con `gesfich` a través de sus tuberías para validar o leer recursos. En su lugar, utiliza directamente una biblioteca interna de acceso a `aralmac` que expone una API para consultar programas y ficheros. Esta biblioteca es compartida entre los componentes que necesitan acceder al almacenamiento.
+
+#### Naturaleza asíncrona de ejecutar_lote
+
+La operación `ejecutar_lote` no es bloqueante. El ejecutor valida que los identificadores de programas y ficheros existan, crea el proceso de lote y retorna inmediatamente el `id_lote` con estado `corriendo`. El lote se ejecuta en segundo plano. Cuando el lote termina (por cualquier causa), el ejecutor actualiza su estado en `aralmac`. El cliente puede consultar el estado mediante `estado_lote`.
 
 | Operación | Datos esperados | Respuesta principal |
 |---|---|---|
-| `ejecutar_lote` | `{ "entrada": "f-0001", "salida": "f-0002", "programas": ["p-0001", "p-0002"] }` | Retorna `id_lote` y estado inicial. |
-| `estado_lote` | `{ "id_lote": "l-0001" }` | Retorna el estado del lote. Si no se envía `id_lote`, lista todos los lotes. |
-| `listar_lotes` | `{}` | Lista todos los procesos de lote. |
-| `matar_lote` | `{ "id_lote": "l-0001" }` | Termina forzosamente un lote en ejecución. |
-| `suspender_servicio` | `{}` | Cambia el ejecutor a suspendido. |
+| `ejecutar_lote` | `{ "entrada": "f-0001", "salida": "f-0002", "programas": ["p-0001", "p-0002"] }` | Retorna id_lote. Ambos ficheros son obligatorios. |
+| `estado_lote` | `{ "id_lote": "l-0001" }` | Consulta el estado de un lote o lista todos si no recibe identificador. |
+| `listar_lotes` | `{}` | Lista los procesos de lote. |
+| `matar_lote` | `{ "id_lote": "l-0001" }` | Termina forzosamente un lote e indica que fue terminado por causa externa. |
+| `suspender_servicio` | `{}` | Cambia el ejecutor a suspendido. Los lotes activos continúan; no se aceptan nuevos. |
 | `reasumir_servicio` | `{}` | Cambia el ejecutor a corriendo. |
 | `parar_ejecutor` | `{}` | Detiene el ejecutor. |
 
-#### Máquina de estados del ejecutor
-
-```
-  [Inicio] --> [Corriendo] <--> [Suspendido]
-                    |
-                    v
-                [Parar] --> [Terminado]
-```
-
-Transiciones:
-
-| Desde | Evento | Hacia |
-|---|---|---|
-| Inicio | arranque | Corriendo |
-| Corriendo | `suspender_servicio` | Suspendido |
-| Suspendido | `reasumir_servicio` | Corriendo |
-| Corriendo | `parar_ejecutor` (procesos = 0) | Parar → Terminado |
-| Corriendo | `parar_ejecutor` (procesos > 0) | espera a que terminen → Terminado |
-
-En estado **Corriendo** se aceptan: `ejecutar_lote`, `estado_lote`, `listar_lotes`, `matar_lote`. En estado **Suspendido** solo se aceptan: `estado_lote`, `listar_lotes`. En estado **Parar** o **Terminado** no se acepta ninguna operación nueva.
-
-#### Máquina de estados de un lote individual
-
-```
-[pendiente] --> [corriendo] --> [terminado]
-                    |
-                    +--> [fallido]
-                    |
-                    +--> [matado]
-```
-
-| Estado | Descripción |
-|---|---|
-| `pendiente` | El lote fue recibido pero aún no comenzó a ejecutarse. |
-| `corriendo` | El lote está en ejecución. |
-| `terminado` | El lote finalizó correctamente. |
-| `fallido` | El lote terminó con error. |
-| `matado` | El lote fue detenido forzosamente con `matar_lote`. |
-
-#### Ejemplos JSON
-
-Ejecutar lote:
+Ejemplo para ejecutar:
 
 ```json
 {
-    "id_peticion": "req-0008",
-    "id_cliente": "cli-0001",
+    "id_peticion": "req-0007",
     "servicio": "ejecutor",
     "operacion": "ejecutar_lote",
     "datos": {
@@ -632,49 +465,44 @@ Ejecutar lote:
 }
 ```
 
-Respuesta exitosa:
+Respuesta (inmediata, el lote corre en segundo plano):
 
 ```json
 {
-    "id_peticion": "req-0008",
-    "id_cliente": "cli-0001",
+    "id_peticion": "req-0007",
     "estado": "ok",
     "mensaje": "Proceso de lote iniciado correctamente",
     "datos": {
         "id_lote": "l-0001",
         "estado_lote": "corriendo"
-    }
+    },
+    "timestamp": "2026-05-07T19:00:00Z"
 }
 ```
 
-Respuesta de error (fichero o programa no existe):
+Cuando el lote termina, el ejecutor envía una notificación al cliente usando el mismo `id_peticion` original:
+
+```json
+{
+    "id_peticion": "req-0007",
+    "estado": "ok",
+    "mensaje": "Proceso de lote finalizado",
+    "datos": {
+        "id_lote": "l-0001",
+        "estado_lote": "terminado",
+        "causa": null
+    },
+    "timestamp": "2026-05-07T19:00:45Z"
+}
+```
+
+Si el lote terminó por error, la notificación lleva `estado_lote: "fallido"` y `causa: "error_ejecucion"`. Si fue matado, lleva `estado_lote: "matado"` y `causa: "terminado_externamente"`.
+
+Ejemplo para consultar estado:
 
 ```json
 {
     "id_peticion": "req-0008",
-    "id_cliente": "cli-0001",
-    "estado": "error",
-    "mensaje": "El fichero de entrada no existe",
-    "codigo": "FICHERO_NO_EXISTE"
-}
-```
-
-```json
-{
-    "id_peticion": "req-0008",
-    "id_cliente": "cli-0001",
-    "estado": "error",
-    "mensaje": "Uno o más programas de la lista no existen",
-    "codigo": "REFERENCIA_INVALIDA"
-}
-```
-
-Consultar estado de un lote:
-
-```json
-{
-    "id_peticion": "req-0009",
-    "id_cliente": "cli-0001",
     "servicio": "ejecutor",
     "operacion": "estado_lote",
     "datos": {
@@ -683,42 +511,28 @@ Consultar estado de un lote:
 }
 ```
 
-Respuesta:
+Respuesta cuando el lote terminó normalmente:
 
 ```json
 {
-    "id_peticion": "req-0009",
-    "id_cliente": "cli-0001",
+    "id_peticion": "req-0008",
     "estado": "ok",
     "mensaje": "Estado del lote consultado correctamente",
     "datos": {
         "id_lote": "l-0001",
-        "estado_lote": "corriendo",
-        "entrada": "f-0001",
-        "salida": "f-0002",
-        "programas": ["p-0001", "p-0002"]
+        "estado_lote": "terminado",
+        "causa": null
     }
 }
 ```
 
-Consultar estado sin identificador (equivale a listar todos):
+Si `estado_lote` no recibe `id_lote`, se interpreta como una consulta general equivalente a listar los procesos de lote.
+
+Ejemplo para matar un lote:
 
 ```json
 {
-    "id_peticion": "req-0009b",
-    "id_cliente": "cli-0001",
-    "servicio": "ejecutor",
-    "operacion": "estado_lote",
-    "datos": {}
-}
-```
-
-Matar lote:
-
-```json
-{
-    "id_peticion": "req-0010",
-    "id_cliente": "cli-0001",
+    "id_peticion": "req-0009",
     "servicio": "ejecutor",
     "operacion": "matar_lote",
     "datos": {
@@ -731,23 +545,37 @@ Respuesta:
 
 ```json
 {
-    "id_peticion": "req-0010",
-    "id_cliente": "cli-0001",
+    "id_peticion": "req-0009",
     "estado": "ok",
-    "mensaje": "Proceso de lote terminado forzosamente",
+    "mensaje": "Proceso de lote terminado por causa externa",
     "datos": {
         "id_lote": "l-0001",
-        "estado_lote": "matado"
+        "estado_lote": "matado",
+        "causa": "terminado_externamente"
     }
 }
 ```
 
-Listar todos los lotes:
+Cuando se consulta el estado de un lote matado, la respuesta también incluye el campo `causa`:
+
+```json
+{
+    "id_peticion": "req-0010",
+    "estado": "ok",
+    "mensaje": "Estado del lote consultado correctamente",
+    "datos": {
+        "id_lote": "l-0001",
+        "estado_lote": "matado",
+        "causa": "terminado_externamente"
+    }
+}
+```
+
+Ejemplo para listar:
 
 ```json
 {
     "id_peticion": "req-0011",
-    "id_cliente": "cli-0001",
     "servicio": "ejecutor",
     "operacion": "listar_lotes",
     "datos": {}
@@ -759,18 +587,19 @@ Respuesta:
 ```json
 {
     "id_peticion": "req-0011",
-    "id_cliente": "cli-0001",
     "estado": "ok",
     "mensaje": "Listado de procesos de lote",
     "datos": {
         "procesos": [
             {
                 "id_lote": "l-0001",
-                "estado_lote": "terminado"
+                "estado_lote": "corriendo",
+                "causa": null
             },
             {
                 "id_lote": "l-0002",
-                "estado_lote": "matado"
+                "estado_lote": "matado",
+                "causa": "terminado_externamente"
             }
         ]
     }
@@ -779,34 +608,104 @@ Respuesta:
 
 ---
 
-## 6. Estados, control y errores
+## 7. Estados, control y errores
 
-Estados de servicios:
+### 7.1 Máquinas de estado
 
-```text
-iniciado, corriendo, suspendido, terminado
+**gesprog y gesfich**
+
+```
+iniciado ──► corriendo ──► suspendido
+                │               │
+                │    reasumir ◄─┘
+                │
+                ▼
+            terminado
 ```
 
-Estados de programas y ficheros:
+| Estado | Descripción |
+|---|---|
+| `iniciado` | El servicio arrancó pero aún no aceptó ninguna petición. |
+| `corriendo` | Procesando peticiones normalmente. |
+| `suspendido` | No acepta peticiones nuevas. Las peticiones recibidas se rechazan con `SERVICIO_SUSPENDIDO`. |
+| `terminado` | El servicio finalizó su ejecución. |
+
+**ctrllt**
+
+```
+iniciado ──► corriendo ──► terminando ──► terminado
+```
+
+| Estado | Descripción |
+|---|---|
+| `iniciado` | Arrancó, aún no enruta peticiones. |
+| `corriendo` | Enrutando peticiones entre cliente y servicios. |
+| `terminando` | Recibió `terminar_servicio`. Está enviando la señal de cierre a los servicios hijos y esperando que confirmen su fin. No acepta peticiones nuevas. |
+| `terminado` | Todos los servicios hijos terminaron. `ctrllt` se apaga. |
+
+**ejecutor**
+
+```
+iniciado ──► corriendo ──► suspendido
+                │               │
+                │    reasumir ◄─┘
+                │
+                ▼
+            parando ──► terminado
+```
+
+| Estado | Descripción |
+|---|---|
+| `iniciado` | Arrancó, listo para recibir lotes. |
+| `corriendo` | Aceptando y ejecutando lotes simultáneamente. |
+| `suspendido` | No acepta lotes nuevos. Los lotes en ejecución continúan hasta terminar. |
+| `parando` | Recibió `parar_ejecutor`. No acepta lotes nuevos. Espera que los lotes activos terminen antes de apagarse (cierre ordenado). |
+| `terminado` | Todos los lotes activos terminaron. El ejecutor se apaga. |
+
+La diferencia entre `suspendido` y `parando` es que `suspendido` es reversible (se puede reasumir), mientras que `parando` es el inicio del apagado definitivo.
+
+**Estados de programas y ficheros:**
 
 ```text
 activo, inactivo, borrado
 ```
 
-Estados de lotes:
+**Estados de lotes:**
 
 ```text
 pendiente, corriendo, terminado, fallido, matado
 ```
 
-Operaciones de control:
+El campo `causa` en la respuesta de estado de un lote puede tomar los siguientes valores:
 
-| Operación | Descripción |
+| Valor | Significado |
 |---|---|
-| `suspender_servicio` | Suspende temporalmente un servicio. |
-| `reasumir_servicio` | Reactiva un servicio suspendido. |
-| `terminar_servicio` | Termina un servicio (gesprog / gesfich). |
-| `parar_ejecutor` | Detiene el ejecutor esperando a que los lotes activos finalicen. |
+| `null` | El lote no ha terminado o terminó normalmente. |
+| `"terminado_externamente"` | El lote fue matado mediante `matar_lote`. |
+| `"error_ejecucion"` | El lote falló durante la ejecución de un programa. |
+
+**Operaciones de control disponibles:**
+
+| Operación | Aplica a | Descripción |
+|---|---|---|
+| `suspender_servicio` | gesprog, gesfich, ejecutor | Suspende el servicio temporalmente. |
+| `reasumir_servicio` | gesprog, gesfich, ejecutor | Reactiva un servicio suspendido. |
+| `terminar_servicio` | gesprog, gesfich, ctrllt | Termina el servicio definitivamente. |
+| `parar_ejecutor` | ejecutor | Inicia el cierre ordenado del ejecutor. |
+
+---
+
+### 7.2 Apagado en cadena desde ctrllt
+
+Cuando `ctrllt` recibe la operación `terminar_servicio` dirigida a sí mismo, antes de apagarse debe detener cada uno de los servicios según su máquina de estados:
+
+1. Envía `suspender_servicio` a `gesprog`, `gesfich` y `ejecutor` para que dejen de aceptar nuevas peticiones.
+2. Espera a que los lotes en ejecución del `ejecutor` terminen (o los mata si se requiere un apagado forzado).
+3. Envía `terminar_servicio` a `gesprog` y `gesfich`.
+4. Envía `parar_ejecutor` al `ejecutor`.
+5. Se apaga a sí mismo.
+
+Los datos persistentes (programas, ficheros y lotes registrados) se conservan entre ejecuciones en `aralmac`. Para eliminarlos es necesario ejecutar el script de limpieza con la opción de borrado de datos, o eliminarlos manualmente.
 
 Errores principales:
 
@@ -818,29 +717,155 @@ Errores principales:
 | `DATOS_INCOMPLETOS` | Faltan campos obligatorios. |
 | `PROGRAMA_NO_EXISTE` | El programa solicitado no existe. |
 | `FICHERO_NO_EXISTE` | El fichero solicitado no existe. |
+| `FICHERO_REQUERIDO` | Falta el fichero de entrada o de salida en `ejecutar_lote`. |
+| `FICHERO_EN_USO` | Se intentó borrar un fichero que está siendo usado por un lote activo. |
 | `LOTE_NO_EXISTE` | El lote solicitado no existe. |
 | `EJECUTABLE_INVALIDO` | El ejecutable no existe o no es válido. |
 | `REFERENCIA_INVALIDA` | Algún identificador enviado no existe. |
 | `LISTA_PROGRAMAS_VACIA` | No se enviaron programas para ejecutar. |
-| `LOTE_NO_ACTIVO` | Se intentó matar un lote que ya terminó o fue matado. |
-| `SERVICIO_SUSPENDIDO` | La operación no está permitida mientras el servicio está suspendido. |
+| `SERVICIO_SUSPENDIDO` | El servicio está suspendido y no acepta nuevas peticiones. |
 | `ERROR_INTERNO` | Error inesperado del servicio. |
 
-Ejemplo de error por servicio suspendido:
+---
+
+## 8. Flujo de ejemplo completo
+
+Este flujo muestra el ciclo completo de vida: registrar un programa, registrar los ficheros, ejecutar el lote y leer el resultado.
+
+**Paso 1 — Registrar el programa**
 
 ```json
 {
-    "id_peticion": "req-0012",
-    "id_cliente": "cli-0001",
-    "estado": "error",
-    "mensaje": "El servicio está suspendido y no puede procesar esta operación",
-    "codigo": "SERVICIO_SUSPENDIDO"
+    "id_peticion": "req-0001",
+    "servicio": "gesprog",
+    "operacion": "registrar_programa",
+    "datos": {
+        "ejecutable": "/usr/bin/sort",
+        "argumentos": ["-n"],
+        "ambiente": {},
+        "descripcion": "Ordena líneas numéricamente"
+    },
+    "timestamp": "2026-05-07T19:00:00Z"
+}
+```
+
+Respuesta:
+
+```json
+{
+    "id_peticion": "req-0001",
+    "estado": "ok",
+    "mensaje": "Programa registrado correctamente",
+    "datos": { "id_programa": "p-0001" },
+    "timestamp": "2026-05-07T19:00:00Z"
+}
+```
+
+**Paso 2 — Crear el fichero de entrada con contenido**
+
+```json
+{
+    "id_peticion": "req-0002",
+    "servicio": "gesfich",
+    "operacion": "crear_fichero",
+    "datos": { "contenido": "3\n1\n2\n" },
+    "timestamp": "2026-05-07T19:00:01Z"
+}
+```
+
+Respuesta:
+
+```json
+{
+    "id_peticion": "req-0002",
+    "estado": "ok",
+    "mensaje": "Fichero creado correctamente",
+    "datos": { "id_fichero": "f-0001" },
+    "timestamp": "2026-05-07T19:00:01Z"
+}
+```
+
+**Paso 3 — Crear el fichero de salida vacío**
+
+```json
+{
+    "id_peticion": "req-0003",
+    "servicio": "gesfich",
+    "operacion": "crear_fichero",
+    "datos": { "contenido": "" },
+    "timestamp": "2026-05-07T19:00:02Z"
+}
+```
+
+Respuesta: `{ "id_fichero": "f-0002" }`
+
+**Paso 4 — Ejecutar el lote**
+
+```json
+{
+    "id_peticion": "req-0004",
+    "servicio": "ejecutor",
+    "operacion": "ejecutar_lote",
+    "datos": {
+        "entrada": "f-0001",
+        "salida": "f-0002",
+        "programas": ["p-0001"]
+    },
+    "timestamp": "2026-05-07T19:00:03Z"
+}
+```
+
+Respuesta inmediata:
+
+```json
+{
+    "id_peticion": "req-0004",
+    "estado": "ok",
+    "mensaje": "Proceso de lote iniciado correctamente",
+    "datos": { "id_lote": "l-0001", "estado_lote": "corriendo" },
+    "timestamp": "2026-05-07T19:00:03Z"
+}
+```
+
+Notificación cuando termina (misma `id_peticion`):
+
+```json
+{
+    "id_peticion": "req-0004",
+    "estado": "ok",
+    "mensaje": "Proceso de lote finalizado",
+    "datos": { "id_lote": "l-0001", "estado_lote": "terminado", "causa": null },
+    "timestamp": "2026-05-07T19:00:04Z"
+}
+```
+
+**Paso 5 — Leer el fichero de salida**
+
+```json
+{
+    "id_peticion": "req-0005",
+    "servicio": "gesfich",
+    "operacion": "leer_fichero",
+    "datos": { "id_fichero": "f-0002" },
+    "timestamp": "2026-05-07T19:00:05Z"
+}
+```
+
+Respuesta:
+
+```json
+{
+    "id_peticion": "req-0005",
+    "estado": "ok",
+    "mensaje": "Fichero encontrado",
+    "datos": { "id_fichero": "f-0002", "contenido": "1\n2\n3\n" },
+    "timestamp": "2026-05-07T19:00:05Z"
 }
 ```
 
 ---
 
-## 7. Decisiones de diseño
+## 9. Decisiones de diseño
 
 Para esta entrega se toman estas decisiones:
 
@@ -850,32 +875,37 @@ Para esta entrega se toman estas decisiones:
 4. Los programas usarán identificadores `p-XXXX`.
 5. Los ficheros usarán identificadores `f-XXXX`.
 6. Los lotes usarán identificadores `l-XXXX`.
-7. `ctrllt` funcionará como pasarela.
-8. `aralmac` no se fija todavía; después puede implementarse con archivos, base de datos o memoria.
-9. La API será igual para Linux y Windows 11.
-10. `ejecutar_lote` recibirá identificadores registrados, no rutas directas.
-11. `crear_fichero` acepta un campo `contenido_base64` opcional. Si no se envía, el fichero se crea vacío.
-12. `leer_programa`, `leer_fichero` y `estado_lote` tienen comportamiento dual: con identificador retornan el recurso específico; sin identificador listan todos los recursos del tipo correspondiente.
-13. Cada mensaje incluirá `id_cliente` para facilitar la identificación de respuestas cuando existan varios clientes usando la misma tubería.
-14. Cada servicio será responsable de crear sus propias tuberías de comunicación.
-15. El orden recomendado de arranque será: almacenamiento, servicios, control y cliente.
-16. El contenido de los ficheros viajará dentro del JSON usando Base64 mediante el campo `contenido_base64`.
-17. En estado suspendido, las operaciones principales no se encolan; se rechazan con un error `SERVICIO_SUSPENDIDO`, excepto las operaciones permitidas para consultar o reactivar el servicio.
+7. `ctrllt` funcionará como pasarela opcional; el cliente puede conectarse directamente a los servicios.
+8. `aralmac` no se fija todavía; después puede implementarse con archivos, base de datos o memoria. El acceso se realiza mediante una biblioteca interna compartida, no a través de las tuberías de los servicios.
+9. En Linux se usa el modelo half-duplex con una tubería de respuesta única por servicio. En Windows 11 se usa obligatoriamente el modelo full-duplex.
+10. `ejecutar_lote` recibirá identificadores registrados, no rutas directas. La operación es no bloqueante: retorna el `id_lote` inmediatamente y el lote corre en segundo plano.
+11. El ejecutor puede gestionar múltiples lotes de forma simultánea, cada uno en su propio hilo.
+12. `matar_lote` establece el estado del lote en `matado` e incluye el campo `causa: "terminado_externamente"` en las respuestas de estado posteriores.
+13. Ambos ficheros (entrada y salida) son obligatorios en `ejecutar_lote`.
+14. Antes de iniciar el sistema se debe ejecutar el script de limpieza para eliminar tuberías huérfanas.
+15. Los datos persisten entre ejecuciones. Para borrarlos es necesario hacerlo explícitamente.
+16. Intentar borrar un fichero que está en uso por un lote activo retorna error `FICHERO_EN_USO`.
 
 ---
 
-## 8. Primera entrega
+## 10. Primera entrega
 
 Esta primera entrega incluye únicamente el diseño de la API. No incluye implementación de código.
 
 El documento define:
 
-- Componentes del sistema.
-- Comunicación por tuberías nombradas.
-- Diseño para Linux y Windows 11.
-- Formato de mensajes JSON.
-- Operaciones de `gesprog`, `gesfich` y `ejecutor`.
-- Máquinas de estados de cada servicio y de los lotes individuales.
-- Estados, errores y operaciones de control.
+- Componentes del sistema y sus responsabilidades.
+- Parámetros de arranque por línea de comandos de cada componente.
+- Comunicación por tuberías nombradas con modelo half-duplex en Linux y full-duplex obligatorio en Windows 11.
+- Procedimiento de limpieza antes de arrancar el sistema.
+- Formato de mensajes JSON con `id_peticion`, `timestamp` y campo `detalles` en errores.
+- Operaciones completas de `gesprog`, `gesfich` y `ejecutor`.
+- Comportamiento asíncrono de `ejecutar_lote` con respuesta inmediata y notificación de fin.
+- Soporte de múltiples lotes simultáneos en el ejecutor.
+- Campo `causa` en el estado de los lotes para indicar terminación normal, externa o por error.
+- Máquinas de estado de todos los componentes, incluyendo estados `terminando` en `ctrllt` y `parando` en el ejecutor.
+- Procedimiento de apagado en cadena desde `ctrllt`.
+- Flujo de ejemplo completo end-to-end.
+- Códigos de error con campo `detalles` para facilitar el diagnóstico.
 
-Con esto queda definido el contrato de comunicación entre los procesos. La implementación futura podrá hacerse en Linux y Windows 11 manteniendo la misma API y cambiando solo la forma de manejar las tuberías nombradas.
+Con esto dejamos definido el contrato de comunicación entre los procesos. La implementación futura podrá hacerse en Linux y Windows 11 manteniendo la misma API y cambiando solo la forma de manejar las tuberías nombradas.
