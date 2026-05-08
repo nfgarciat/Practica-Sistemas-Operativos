@@ -1,7 +1,7 @@
 # Ejecutor de lotes
 
 **Curso:** Sistemas Operativos 
-- Universidad EAFIT  
+Universidad EAFIT  
 **Integrantes:**
 - Maria Clara Medina
 - Franchesca Garcia Tabares
