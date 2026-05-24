@@ -1,13 +1,10 @@
 # Ejecutor de Lotes — Práctica VII
+Sistemas Operativos — Universidad EAFIT  
+Asignatura ST0257 — Segunda y tercera entrega
 
 ## Autores
-Práctica realizada en pareja (entrega para Linux y Windows 11).
-
 - Maria Clara Medina
 - Franchesca Garcia Tabares
-Sistemas Operativos — Universidad EAFIT
-Asignatura ST0257
-Segunda y tercera entrega.
 
 ## Resumen
 
