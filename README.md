@@ -84,6 +84,5 @@ bash scripts/test_linux.sh     # caso feliz: crear, ejecutar, leer salida
 bash scripts/test_errores.sh   # errores y suspender/reasumir
 ```
 
-## Autores
 
-Práctica realizada en pareja (entrega para Linux y Windows 11).
+
